@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mini‑Obsidian</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="icon" href="data:," />
+</head>
+<body class="h-screen overflow-hidden">
+  <div id="root" class="h-full"></div>
+
+  <!-- React -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Libraries -->
+  <script src="https://unpkg.com/marked/marked.min.js"></script>
+  <script src="https://unpkg.com/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="https://unpkg.com/d3@7/dist/d3.min.js"></script>
+  <style>
+    :root {
+      --bg: #1b1c21;
+      --panel: #23242b;
+      --panel-alt: #2d2f37;
+      --border: #363842;
+      --accent: #7e5bef; /* purple */
+      --accent-hover: #a78bfa;
+      --accent-fade: rgba(126,91,239,0.15);
+      --text: #e6e8ee;
+      --text-dim: #9aa0b3;
+      --danger: #ef4444;
+      --danger-hover: #f87171;
+      color-scheme: dark;
+    }
+    body { background: var(--bg); color: var(--text); font-feature-settings: 'ss01' on; }
+    /* Panel & borders */
+    .bg-white, .bg-gray-50 { background-color: var(--panel) !important; }
+    .hover\:bg-gray-50:hover { background-color: var(--panel-alt) !important; }
+    .bg-gray-100 { background-color: var(--panel-alt) !important; }
+    .hover\:bg-gray-100:hover { background-color: var(--panel-alt) !important; }
+    .border, .border-b, .border-t, .border-r, .border-l { border-color: var(--border) !important; }
+    /* Accent buttons */
+    .bg-black { background-color: var(--accent) !important; }
+    .bg-black:hover { background-color: var(--accent-hover) !important; }
+    .text-red-600 { color: var(--danger) !important; }
+    .text-red-600:hover { color: var(--danger-hover) !important; }
+    /* Inputs */
+    input, textarea { background: var(--panel-alt); border-color: var(--border) !important; color: var(--text); }
+    input:focus, textarea:focus { outline: 2px solid var(--accent-fade); outline-offset: 1px; }
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 10px; }
+    ::-webkit-scrollbar-track { background: var(--panel); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+    /* Prose / markdown */
+    .prose { color: var(--text); }
+    .prose a { color: var(--accent); }
+    .prose a:hover { color: var(--accent-hover); }
+    .prose code { background: var(--panel-alt); padding: 2px 5px; border-radius: 4px; }
+    .prose pre code { background: transparent; }
+    /* Tag & pill buttons */
+    .rounded-full.bg-gray-100 { background: var(--panel-alt) !important; }
+    .rounded-full.bg-gray-100:hover { background: var(--accent-fade) !important; }
+    /* Graph background */
+    svg { background: var(--panel-alt); }
+    /* Subtle shadow for panels */
+    header, .w-80, main, .grid > div { box-shadow: 0 1px 0 0 var(--border); }
+    /* Accent ring */
+    button { transition: background-color .15s, color .15s, border-color .15s; }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* Selection */
+    ::selection { background: var(--accent); color: #fff; }
+    /* Placeholder */
+    ::placeholder { color: var(--text-dim); }
+    /* Result highlight (search excerpts) */
+    b { color: var(--accent); }
+  </style>
+
+  <!-- Basic runtime error overlay so a silent failure doesn't show a white screen -->
+  <script>
+    (function(){
+      function showError(msg){
+        var el = document.getElementById('root');
+        if(!el) return;
+        if(el.dataset.hadError) return;
+        el.dataset.hadError = '1';
+        el.innerHTML = '<div style="font-family:monospace;padding:16px;background:#fee;color:#900;border:1px solid #f99;white-space:pre-wrap;max-height:100%;overflow:auto">'+msg+'</div>';
+      }
+      window.addEventListener('error', function(e){
+        showError((e.error && e.error.stack) || e.message);
+      });
+      window.addEventListener('unhandledrejection', function(e){
+        showError((e.reason && e.reason.stack) || String(e.reason));
+      });
+    })();
+  </script>
+
+  <script type="text/javascript">
+  const { useState, useEffect, useMemo, useRef } = React;
+
+  // Fallback if CDN failed
+  const safeMarked = (typeof marked !== 'undefined') ? marked : { parse: s => s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])) };
+  const SafeDOMPurify = (typeof DOMPurify !== 'undefined') ? DOMPurify : { sanitize: s => s };
+
+  function api(path, opts={}) {
+    console.log('API call:', path);
+    return fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts })
+      .then(r => {
+        console.log('API response:', r.status, path);
+        if (!r.ok) throw new Error('HTTP '+r.status);
+        return r.json();
+      })
+      .catch(e => {
+        console.error('API error:', e, path);
+        throw e;
+      });
+  }
+
+  function classNames(...xs){ return xs.filter(Boolean).join(' '); }
+
+  function Sidebar({ notes, onSelect, selectedId, onNew, onDelete, onSearch, tags, onTagClick }){
+    const [q, setQ] = useState('');
+    const [results, setResults] = useState([]);
+
+    useEffect(() => {
+      if (!q) { setResults([]); return; }
+      const t = setTimeout(() => {
+        api('/api/search?q='+encodeURIComponent(q)).then(setResults).catch(()=>{});
+      }, 150);
+      return () => clearTimeout(t);
+    }, [q]);
+
+    return (
+      React.createElement('div', { className: 'w-80 border-r bg-white h-full flex flex-col' },
+        React.createElement('div', { className: 'p-3 border-b space-y-2' },
+          React.createElement('div', { className: 'flex gap-2' },
+            React.createElement('input', {
+              className: 'flex-1 rounded-md border px-3 py-2 text-sm',
+              placeholder: 'Search…', value: q,
+              onChange: e => setQ(e.target.value)
+            }),
+            React.createElement('button', { className: 'px-3 py-2 text-sm rounded-md bg-black text-white', onClick: onNew }, '+')
+          ),
+          !!results.length && React.createElement('div', { className: 'text-xs text-gray-500' }, results.length+ ' results'),
+          !!results.length && React.createElement('div', { className: 'max-h-40 overflow-auto space-y-1' },
+            results.map(r => React.createElement('button', {
+              key: r.id,
+              onClick: () => onSelect(r.id),
+              className: 'w-full text-left px-2 py-1 rounded hover:bg-gray-100'
+            }, React.createElement('div', { className: 'font-medium' }, r.title),
+               React.createElement('div', { className: 'text-[11px] text-gray-500', dangerouslySetInnerHTML: { __html: r.snippet || '' }})
+            ))
+          )
+        ),
+        React.createElement('div', { className: 'p-3 border-b flex flex-wrap gap-2 overflow-auto max-h-28' },
+          tags.map(t => React.createElement('button', {
+            key: t.tag,
+            onClick: () => onTagClick(t.tag),
+            className: 'text-xs px-2 py-1 rounded-full bg-gray-100 hover:bg-gray-200'
+          }, '#'+t.tag, ' ', React.createElement('span', { className: 'text-gray-500' }, '(', t.count, ')')))
+        ),
+        React.createElement('div', { className: 'flex-1 overflow-auto' },
+          notes.map(n => React.createElement('div', {
+            key: n.id,
+            className: classNames('px-3 py-2 border-b hover:bg-gray-50 cursor-pointer', selectedId===n.id && 'bg-gray-100'),
+            onClick: () => onSelect(n.id)
+          },
+            React.createElement('div', { className: 'flex items-center justify-between' },
+              React.createElement('div', { className: 'font-medium truncate' }, n.title),
+              React.createElement('button', { className: 'text-xs text-red-600 hover:underline', onClick: (e)=>{e.stopPropagation(); onDelete(n.id);} }, 'Delete')
+            ),
+            React.createElement('div', { className: 'text-xs text-gray-500 truncate' }, n.snippet)
+          ))
+        )
+      )
+    );
+  }
+
+  function Graph({ onSelect }){
+    const ref = useRef(null);
+    useEffect(() => {
+      api('/api/graph').then(({nodes, edges}) => {
+        const el = ref.current; el.innerHTML = '';
+        const width = el.clientWidth, height = el.clientHeight;
+        const svg = d3.select(el).append('svg').attr('width', width).attr('height', height);
+        const link = svg.append('g').selectAll('line').data(edges).enter().append('line').attr('stroke', '#999').attr('stroke-opacity', 0.6);
+        const node = svg.append('g').selectAll('circle').data(nodes).enter().append('circle').attr('r', 6).attr('fill', '#111').call(d3.drag().on('start', dragstarted).on('drag', dragged).on('end', dragended)).on('click', (e,d)=> onSelect(d.id));
+        const label = svg.append('g').selectAll('text').data(nodes).enter().append('text').text(d=>d.title).attr('font-size', 10).attr('dx', 8).attr('dy', 4);
+        const sim = d3.forceSimulation(nodes).force('link', d3.forceLink(edges).distance(60).id(d=>d.id)).force('charge', d3.forceManyBody().strength(-120)).force('center', d3.forceCenter(width/2, height/2));
+        sim.on('tick', () => {
+          link.attr('x1', d=>d.source.x).attr('y1', d=>d.source.y).attr('x2', d=>d.target.x).attr('y2', d=>d.target.y);
+          node.attr('cx', d=>d.x).attr('cy', d=>d.y);
+          label.attr('x', d=>d.x).attr('y', d=>d.y);
+        });
+        function dragstarted(event,d){ if(!event.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }
+        function dragged(event,d){ d.fx=event.x; d.fy=event.y; }
+        function dragended(event,d){ if(!event.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }
+      });
+    }, []);
+    return React.createElement('div', { ref, className: 'w-full h-full' });
+  }
+
+  function Editor({ note, onChange }){
+    const [tab, setTab] = useState('edit');
+    const html = useMemo(() => {
+  const rendered = safeMarked.parse(note?.content || '');
+  return SafeDOMPurify.sanitize(rendered);
+    }, [note?.content]);
+
+    return (
+      React.createElement('div', { className: 'h-full flex flex-col' },
+        React.createElement('div', { className: 'border-b px-3 py-2 flex items-center gap-2 bg-white' },
+          ['edit','preview'].map(t => (
+            React.createElement('button', { key: t, onClick: ()=>setTab(t), className: classNames('px-3 py-1 rounded-md text-sm', tab===t?'bg-black text-white':'bg-gray-100') }, t)
+          ))
+        ),
+        tab==='edit' ? (
+          React.createElement('textarea', {
+            className: 'flex-1 w-full p-3 outline-none text-sm',
+            value: note?.content || '',
+            onChange: e => onChange({ ...note, content: e.target.value })
+          })
+        ) : (
+          React.createElement('div', { className: 'flex-1 overflow-auto p-6 prose max-w-none bg-white', dangerouslySetInnerHTML: { __html: html } })
+        )
+      )
+    );
+  }
+
+  function App(){
+    console.log('App component loading...');
+    const [notes, setNotes] = useState([]);
+    const [tags, setTags] = useState([]);
+    const [selectedId, setSelectedId] = useState(null);
+    const [note, setNote] = useState(null);
+    const [backlinks, setBacklinks] = useState([]);
+    const [showGraph, setShowGraph] = useState(false);
+
+    function refreshList(){ 
+      console.log('Refreshing lists...');
+      api('/api/notes').then(setNotes).catch(e => console.error('Failed to load notes:', e)); 
+      api('/api/tags').then(setTags).catch(e => console.error('Failed to load tags:', e)); 
+    }
+
+    useEffect(() => { refreshList(); }, []);
+
+    useEffect(() => {
+      if (selectedId==null) { setNote(null); setBacklinks([]); return; }
+      api('/api/notes/'+selectedId).then(n => { setNote(n); api('/api/notes/'+n.id+'/backlinks').then(setBacklinks); });
+    }, [selectedId]);
+
+    function save(n){
+      if (!n.title || !n.title.trim()) { alert('Title required'); return; }
+      const method = n.id ? 'PUT' : 'POST';
+      const url = n.id ? '/api/notes/'+n.id : '/api/notes';
+      api(url, { method, body: JSON.stringify({ title: n.title, content: n.content }) })
+        .then(saved => { setSelectedId(saved.id); refreshList(); setNote(saved); });
+    }
+
+    function onNew(){
+      const title = prompt('New note title:');
+      if (!title) return;
+      save({ title, content: '' });
+    }
+
+    function onDelete(id){
+      if (!confirm('Delete this note?')) return;
+      api('/api/notes/'+id, { method: 'DELETE' }).then(()=>{ if (selectedId===id) setSelectedId(null); refreshList(); });
+    }
+
+    function onTagClick(tag){
+      api('/api/search?q='+encodeURIComponent(tag)).then(rs => {
+        const ids = new Set(rs.map(r=>r.id));
+        setNotes(prev => prev.filter(n => ids.has(n.id)));
+      });
+    }
+
+    function clickInPreview(e){
+      const a = e.target.closest('a[data-wikilink]');
+      if (a){
+        e.preventDefault();
+        const title = a.getAttribute('data-wikilink');
+        // Try to find note by title; if not exist, create it.
+        fetch('/api/search?q='+encodeURIComponent('"'+title+'"')).then(r=>r.json()).then(rs => {
+          const match = notes.find(n => n.title === title);
+          if (match) { setSelectedId(match.id); return; }
+          save({ title, content: '' });
+        });
+      }
+    }
+
+    // decorate wikilinks in preview by intercepting HTML after render
+    useEffect(() => {
+      if (!note) return; // no-op
+      const root = document.querySelector('#preview-decorator');
+      if (!root) return;
+      const anchors = root.querySelectorAll('a');
+      anchors.forEach(a => {
+        const m = a.textContent && a.textContent.match(/^\[\[(.*)\]\]$/);
+        if (m){
+          a.setAttribute('data-wikilink', m[1]);
+          a.setAttribute('href', '#'+encodeURIComponent(m[1]));
+        }
+      });
+      root.addEventListener('click', clickInPreview);
+      return () => root.removeEventListener('click', clickInPreview);
+    }, [note]);
+
+    return (
+      React.createElement('div', { className: 'h-full grid grid-cols-[20rem_1fr] grid-rows-[auto_1fr]' },
+        React.createElement('header', { className: 'col-span-2 border-b bg-white px-4 py-2 flex items-center gap-3' },
+          React.createElement('div', { className: 'font-semibold' }, 'Mini‑Obsidian'),
+          React.createElement('button', { className: 'text-sm px-2 py-1 rounded bg-gray-100', onClick: ()=> setShowGraph(s=>!s) }, showGraph?'Hide graph':'Show graph'),
+          note && React.createElement('button', { className: 'text-sm px-2 py-1 rounded bg-gray-100', onClick: ()=> save(note) }, 'Save'),
+          React.createElement('div', { className: 'ml-auto flex gap-2 items-center' },
+            React.createElement('a', { href: 'https://ollama.com', target: '_blank', rel: 'noopener', className: 'text-xs text-gray-500 hover:text-gray-300' }, 'Ollama')
+          )
+        ),
+        React.createElement(Sidebar, { notes, onSelect: setSelectedId, selectedId, onNew, onDelete, onSearch:()=>{}, tags, onTagClick }),
+        showGraph ? React.createElement('div', { className: 'h-full' }, React.createElement(Graph, { onSelect: setSelectedId })) : (
+          React.createElement('main', { className: 'h-full grid grid-rows-[auto_1fr]'},
+            React.createElement('div', { className: 'border-b bg-white px-4 py-2 flex items-center gap-2' },
+              React.createElement('input', { className: 'flex-1 max-w-xl border rounded px-2 py-1 text-sm', placeholder: 'Note title', value: note?.title || '', onChange: e => setNote(n => ({...n, title: e.target.value})) })
+            ),
+            React.createElement('div', { className: 'grid grid-cols-[1fr_1fr_22rem] h-full' },
+              React.createElement(Editor, { note: note || { title: '', content: '' }, onChange: setNote }),
+              React.createElement('div', { className: 'h-full flex flex-col' },
+                React.createElement('div', { className: 'border-b bg-white px-3 py-2 text-sm' }, 'Preview'),
+                React.createElement('div', { id: 'preview-decorator', className: 'flex-1 overflow-auto p-6 prose max-w-none bg-white', dangerouslySetInnerHTML: { __html: SafeDOMPurify.sanitize(safeMarked.parse((note&&note.content)||'')) } }),
+                React.createElement('div', { className: 'border-t bg-white px-3 py-2 text-sm text-gray-600' },
+                  React.createElement('div', null, 'Backlinks:'),
+                  React.createElement('div', { className: 'flex flex-wrap gap-2 mt-1' },
+                    backlinks.length ? backlinks.map(b => React.createElement('button', { key: b.id, onClick: ()=>setSelectedId(b.id), className: 'text-xs px-2 py-1 rounded bg-gray-100' }, b.title)) : React.createElement('span', null, 'None')
+                  )
+                )
+              ),
+              React.createElement(ChatPanel, { activeNote: note })
+            )
+          )
+        )
+      )
+    );
+  }
+
+  function ChatPanel({ activeNote }) {
+    const [messages, setMessages] = useState([]); // {role:'user'|'ai', text:string, notes_used?:[]}
+    const [input, setInput] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [settings, setSettings] = useState({ includeAll: false, topK: 5 });
+
+    async function send(){
+      if (!input.trim() || loading) return;
+      const prompt = input.trim();
+      setInput('');
+      setMessages(ms => [...ms, { role:'user', text: prompt }]);
+      setLoading(true);
+      try {
+        const r = await fetch('/api/ai/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ prompt, noteId: activeNote?.id, topK: settings.topK, includeAll: settings.includeAll }) });
+        const data = await r.json();
+        if(!r.ok) throw new Error(data.error || 'AI error');
+        setMessages(ms => [...ms, { role:'ai', text: data.response, notes_used: data.notes_used }]);
+      } catch(e){
+        setMessages(ms => [...ms, { role:'ai', text: 'Error: '+e.message }]);
+      } finally { setLoading(false); }
+    }
+
+    function onKey(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } }
+
+    return React.createElement('div', { className:'h-full flex flex-col border-l bg-white' },
+      React.createElement('div', { className:'border-b px-3 py-2 text-sm flex items-center gap-2' },
+        React.createElement('div', { className:'font-medium' }, 'AI Chat'),
+        React.createElement('label', { className:'flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer' },
+          React.createElement('input', { type:'checkbox', checked: settings.includeAll, onChange: e=> setSettings(s=>({...s, includeAll: e.target.checked})) }),
+          'All notes'
+        ),
+        React.createElement('select', { className:'text-[11px] bg-gray-100 rounded px-1 py-0.5', value: settings.topK, onChange: e=> setSettings(s=>({...s, topK: Number(e.target.value)})) },
+          [3,5,8,12].map(n=> React.createElement('option', { key:n, value:n }, 'top ', n))
+        )
+      ),
+      React.createElement('div', { className:'flex-1 overflow-auto p-3 space-y-3 text-sm' },
+        messages.map((m,i)=> React.createElement('div', { key:i, className: m.role==='user' ? 'text-right' : 'text-left' },
+          React.createElement('div', { className: 'inline-block rounded px-3 py-2', style:{ background: m.role==='user'?'var(--accent)':'var(--panel-alt)', color: m.role==='user'?'#fff':'var(--text)'} },
+            m.text.split(/\n+/).map((line,j)=> React.createElement('div', { key:j }, line))
+          ),
+          m.notes_used && !!m.notes_used.length && React.createElement('div', { className:'mt-1 text-[10px] text-gray-500' }, 'Context: ', m.notes_used.map(n=>n.title).join(', '))
+        ))
+      ),
+      React.createElement('form', { className:'p-2 border-t flex flex-col gap-2', onSubmit: e=> { e.preventDefault(); send(); } },
+        React.createElement('textarea', { rows:2, className:'w-full text-sm p-2 rounded border resize-none', placeholder: 'Ask about your notes…', value: input, onChange: e=> setInput(e.target.value), onKeyDown: onKey }),
+        React.createElement('div', { className:'flex justify-between items-center' },
+          React.createElement('div', { className:'text-[11px] text-gray-500' }, activeNote ? 'Using current note + retrieval' : 'Retrieval only'),
+          React.createElement('button', { type:'submit', disabled: loading, className:'px-3 py-1 rounded bg-black text-white text-sm disabled:opacity-50' }, loading?'Thinking…':'Send')
+        )
+      )
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+</body>
+</html>
